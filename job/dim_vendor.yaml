@@ -1,0 +1,13 @@
+# dim_vendor 是一个单表更新样例
+desc:
+  primary:
+    host: localhost
+    port: 3306
+    user: myuser
+    password: mypassword
+  secondary:
+    host: secondary-db.example.com
+    port: 5432
+    user: secuser
+    password: secpassword
+

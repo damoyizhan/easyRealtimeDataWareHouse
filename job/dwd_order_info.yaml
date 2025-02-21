@@ -1,0 +1,111 @@
+"""
+样例说明：
+   表清单:
+       order_info    业务表,订单主表
+       order_sub     业务表,子订单表
+       order_deliver 业务表,货运表
+       order_device  日志表，下单时设备上报日志
+   计算场景:
+      1、多流join
+      2、多流join 下，临时ods数据什么时候可以删除
+"""
+
+# 数据merge到dwd表:
+# 注意点1:每个SQL 都只做数据merge into dw 的操作
+# 注意点2:每个SQL 都只处理自己有的列，其它列不处理（如订单的快递单号合并到订单表时，不处理金额信息）
+# 注意点3:离线数据仓库的 ta join tb 关联操作，全部转换为ta merge into dw + tb merge into dw 这样不需要做ta、tb表计算的窗口等待，
+# 注意点4：etl_time 使用 数据库的func,所有etl_time 都不使用第三方服务器生成;
+sql_example_merge = """
+insert into dw.dwd_order_info
+(
+    order_id    ,
+    user_id     ,
+    amount      ,
+    create_time ,
+    update_time ,
+    etl_time
+)
+select  order_id    ,
+        user_id     ,
+        amount      ,
+        create_time ,
+        update_time ,
+        etl_time
+from ods.order_info
+where etl_time between {start_time} and {end_time}
+on duplicate key update
+    order_id        =values(order_id   ),
+    user_id         =values(user_id    ),
+    amount          =values(amount     ),
+    create_time     =values(create_time),
+    update_time     =values(update_time),
+    etl_time        =unix_timestamp(current_timestamp(3))*1000
+"""
+
+# 补充迟到的数据
+# 注意点1:补充迟到数据时，仍然需要控制窗口大小，{start_time} 和 {end_time} 的区间不变
+# 注意点2:{delay_time} 根据实际情况选择，比如99.99的数据迟到不超过1分钟，那么 {delay_time} 就设定1分钟
+# 注意点3:如果{delay_time} 过于长尾，但是计算场景又不允许过多的延迟，可以每个周期中，sql多次执行
+
+sql_example_late = """
+insert into dw.dwd_order_info
+(
+    order_id    ,
+    etl_time
+)
+select  order_id    ,
+        etl_time
+from ods.order_device
+where etl_time between {start_time} - {delay_time}and {end_time} - {delay_time}
+on duplicate key update
+    order_id        =values(order_id   ),
+    etl_time        =unix_timestamp(current_timestamp(3))*1000
+"""
+
+# 多次执行样例:多个SQL
+sql_example_late_multi_sql = """
+insert into dw.dwd_order_info
+(
+    order_id    ,
+)
+select  order_id    ,
+        etl_time
+from ods.order_device
+where etl_time between {start_time} - {delay_time2} and {end_time} - {delay_time2}
+-- 多次执行，以消耗算力为代价，保证数据更新实时性
+on duplicate key update
+    order_id        =values(order_id   ),
+    etl_time        =unix_timestamp(current_timestamp(3))*1000
+"""
+
+# 多次执行样例2:多个where条件
+sql_example_late_multi_where = """
+insert into dw.dwd_order_info
+(
+    order_id    ,
+)
+select  order_id    ,
+        etl_time
+from ods.order_device
+where etl_time between {start_time} - {delay_time} and {end_time} - {delay_time}
+or    etl_time between {start_time} - {delay_time2} and {end_time} - {delay_time2}
+-- 多次执行，以消耗算力为代价，保证数据更新实时性
+on duplicate key update
+    order_id        =values(order_id   ),
+    etl_time        =unix_timestamp(current_timestamp(3))*1000
+"""
+
+
+sql_list = list()
+sql_list.append({"sql": sql_example_merge           , "thread_group": 1})
+sql_list.append({"sql": sql_example_late            , "thread_group": 1})
+sql_list.append({"sql": sql_example_late_multi_sql  , "thread_group": 1})
+sql_list.append({"sql": sql_example_late_multi_where, "thread_group": 1})
+
+# thread_group 说明:
+# 线程分组，当计算量大性能下降，且有些计算相互之间没有任何关系的时候，可以通过线程分组的方式用多线程执行任务
+# 实际测试，多数场景超过5个线程没有任何作用
+# 注意点1:分组之间没有逻辑关系（其实就相当于一个任务拆成了两个任务，只是在一个文件里维护）
+# 注意点2:实际上每一次提交还是多个线程都执行完成后才能提交，从这个角度讲，线程分组不如任务拆分有效;
+# todo : 线程分组代码
+
